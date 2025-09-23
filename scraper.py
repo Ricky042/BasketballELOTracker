@@ -4,6 +4,7 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
+from selenium.common.exceptions import TimeoutException, ElementClickInterceptedException
 from webdriver_manager.chrome import ChromeDriverManager
 import pandas as pd
 import time
@@ -33,7 +34,7 @@ for round_url in round_urls:
         WebDriverWait(driver, 10).until(
             EC.presence_of_all_elements_located((By.CSS_SELECTOR, "[data-testid='games-on-date']"))
         )
-    except:
+    except TimeoutException:
         print(f"Timeout loading {round_url}")
         continue
 
@@ -96,18 +97,25 @@ for round_url in round_urls:
 for game in all_games:
     print(f"Scraping players for game: {game['home_team']} vs {game['away_team']}")
     driver.get(game['box_score_link'])
-    time.sleep(2)  # allow page to load dynamic content
+    time.sleep(2)  # allow dynamic content to load
 
-    # Toggle "Show advanced stats" if button exists
+    # Toggle "Show advanced stats" reliably
     try:
-        # Find the "Show advanced stats" button by its text
-        adv_button = driver.find_element(
-            By.XPATH, "//button[.//span[text()='Show advanced stats']]"
+        adv_button = WebDriverWait(driver, 10).until(
+            EC.presence_of_element_located((By.XPATH, "//button[.//span[text()='Show advanced stats']]"))
         )
+
+        # Scroll into view
+        driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", adv_button)
+
+        # Wait until clickable and click
+        WebDriverWait(driver, 5).until(EC.element_to_be_clickable((By.XPATH, "//button[.//span[text()='Show advanced stats']]")))
         adv_button.click()
-        time.sleep(1)  # wait for the table to update
-    except:
-        pass  # no advanced stats button found
+        print("DEBUG: Advanced stats toggled ON")
+        time.sleep(2)  # wait for table update
+
+    except (TimeoutException, ElementClickInterceptedException) as e:
+        print(f"DEBUG: Could not toggle advanced stats: {e}")
 
     # Find tables for both teams
     tables = driver.find_elements(By.CSS_SELECTOR, "table[data-testid^='stats-']")
@@ -117,17 +125,25 @@ for game in all_games:
         for row in rows:
             try:
                 cells = row.find_elements(By.TAG_NAME, "td")
-                if len(cells) < 6:  # skip invalid rows
+                print(f"DEBUG: Found {len(cells)} cells -> {[c.text for c in cells]}")
+
+                if len(cells) < 6:
+                    print("DEBUG: Skipping row, not enough cells")
                     continue
+
                 jersey = cells[0].text.strip()
                 player_a_tag = cells[1].find_element(By.TAG_NAME, "a")
                 player_name = player_a_tag.text.strip()
                 player_id = player_a_tag.get_attribute("href").split("/")[-2]
-                points = int(cells[2].text.strip())
-                one_pm = int(cells[3].text.strip())
-                two_pm = int(cells[4].text.strip())
-                three_pm = int(cells[5].text.strip())
-                fouls = int(cells[6].text.strip()) if len(cells) > 6 else 0
+
+                points = int(cells[2].text.strip() or 0)
+                one_pm = int(cells[3].text.strip() or 0)
+                two_pm = int(cells[4].text.strip() or 0)
+                three_pm = int(cells[5].text.strip() or 0)
+                fouls = int(cells[6].text.strip() or 0) if len(cells) > 6 else 0
+
+                print(f"DEBUG: Parsed player {player_name} ({jersey}) -> "
+                      f"PTS={points}, 1PM={one_pm}, 2PM={two_pm}, 3PM={three_pm}, FOULS={fouls}")
 
                 all_players.append({
                     "game_date": game['date'],
@@ -142,6 +158,7 @@ for game in all_games:
                     "3PM": three_pm,
                     "fouls": fouls
                 })
+
             except Exception as e:
                 print("Error parsing player row:", e)
 
