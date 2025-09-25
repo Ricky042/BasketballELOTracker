@@ -8,25 +8,32 @@ from selenium.common.exceptions import ElementClickInterceptedException
 from webdriver_manager.chrome import ChromeDriverManager
 import pandas as pd
 import time
+import threading
 
 # -----------------------
 # Configuration
 # -----------------------
 BASE = "https://www.playhq.com"
-START_PAGE = "https://www.playhq.com/basketball-victoria/org/balwyn-blazers-basketball-association-senior-competition/open-age-mens-thursday-night-winter-2025/b9a20da8"
-
-# Selenium setup
-options = Options()
-options.headless = True
-options.add_argument("--window-size=1920,1080")
-driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
+START_PAGE = "https://www.playhq.com/basketball-victoria/org/balwyn-blazers-basketball-association-senior-competition/winter-2025/b9a20da8"
 
 all_games = []
 all_players = []
+lock = threading.Lock()  # thread-safe append
+
+# -----------------------
+# Selenium driver factory
+# -----------------------
+def create_driver(headless=True):
+    options = Options()
+    options.headless = headless
+    options.add_argument("--window-size=1920,1080")
+    driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
+    return driver
 
 # -----------------------
 # Step 1: Collect all grades
 # -----------------------
+driver = create_driver(headless=True)
 driver.get(START_PAGE)
 time.sleep(2)
 
@@ -40,29 +47,27 @@ for grade_el in grade_elements:
     except Exception as e:
         print("Error collecting grade info:", e)
 
-# Include current grade if first one is active and skipped
 if not grades_info:
     active_grade_el = driver.find_element(By.CSS_SELECTOR, "h2 span")
-    grade_name = active_grade_el.text.strip()
-    grade_url = driver.current_url
-    grades_info.append((grade_name, grade_url))
+    grades_info.append((active_grade_el.text.strip(), driver.current_url))
 
 print(f"Found grades: {[g[0] for g in grades_info]}")
+driver.quit()
 
 # -----------------------
-# Step 2: Collect all rounds per grade
+# Scrape each grade
 # -----------------------
-for grade_name, grade_url in grades_info:
+def scrape_grade(grade_name, grade_url):
+    driver = create_driver(headless=True)
     print(f"\nScraping grade: {grade_name}")
     driver.get(grade_url)
     time.sleep(2)
 
-    # Detect rounds dynamically
+    # Detect rounds
     round_elements = driver.find_elements(By.CSS_SELECTOR, "ul.sc-1odi71i-0 li a[data-testid^='page-']")
     round_urls = [el.get_attribute("href") for el in round_elements]
     round_names = [el.text.strip() for el in round_elements]
 
-    # Ensure R1 first
     if "R1" not in [r.split("/")[-1] for r in round_urls]:
         round_urls.insert(0, grade_url + "/R1")
         round_names.insert(0, "R1")
@@ -70,7 +75,7 @@ for grade_name, grade_url in grades_info:
     print(f"Rounds detected: {round_names}")
 
     # -----------------------
-    # Step 3: Collect all games (fixtures) first
+    # Scrape fixtures
     # -----------------------
     for r_name, r_url in zip(round_names, round_urls):
         print(f"Scraping fixtures for {grade_name} - {r_name}")
@@ -124,7 +129,7 @@ for grade_name, grade_url in grades_info:
                         away_score = None
                         forfeit = True
 
-                    all_games.append({
+                    game_data = {
                         "grade": grade_header,
                         "round": round_header,
                         "date": date_text,
@@ -136,77 +141,95 @@ for grade_name, grade_url in grades_info:
                         "away_score": away_score,
                         "forfeit": forfeit,
                         "box_score_link": box_score_link
-                    })
+                    }
+
+                    with lock:
+                        all_games.append(game_data)
                 except Exception as e:
                     print("Error parsing game:", e)
 
-# -----------------------
-# Step 4: Scrape all player stats
-# -----------------------
-for game in all_games:
-    print(f"\nScraping players for game: {game['home_team']} vs {game['away_team']} ({game['round']})")
-    driver.get(game['box_score_link'])
-    time.sleep(2)
-    driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
-    time.sleep(1)
+    # -----------------------
+    # Old scrolling player stats method
+    # -----------------------
+    for game in list(all_games):
+        if game['grade'] != grade_name:
+            continue
 
-    # Toggle "Show advanced stats"
-    try:
-        adv_button = driver.find_element(By.XPATH, "//button[.//span[text()='Show advanced stats']]")
-        span_class = adv_button.find_element(By.TAG_NAME, "span").get_attribute("class")
-        if "hIyAxi" in span_class:
-            driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", adv_button)
-            time.sleep(0.5)
-            adv_button.click()
-            time.sleep(2)
-    except ElementClickInterceptedException:
-        driver.execute_script("arguments[0].click();", adv_button)
+        print(f"\nScraping players for game: {game['home_team']} vs {game['away_team']} ({game['round']})")
+        driver.get(game['box_score_link'])
         time.sleep(2)
-    except Exception:
-        pass
+        driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+        time.sleep(1)
 
-    tables = driver.find_elements(By.CSS_SELECTOR, "table[data-testid^='stats-']")
-    for table in tables:
-        team_id = table.get_attribute("data-testid").replace("stats-", "")
-        rows = table.find_elements(By.CSS_SELECTOR, "tbody tr")
-        for row in rows:
+        # Click advanced stats if exists
+        try:
+            adv_button = driver.find_element(By.XPATH, "//button[.//span[text()='Show advanced stats']]")
             try:
-                cells = row.find_elements(By.TAG_NAME, "td")
-                if len(cells) < 6:
-                    continue
+                driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", adv_button)
+                adv_button.click()
+                time.sleep(1)
+            except ElementClickInterceptedException:
+                driver.execute_script("arguments[0].click();", adv_button)
+                time.sleep(1)
+        except:
+            pass
 
-                jersey = cells[0].text.strip()
-                player_a_tag = cells[1].find_element(By.TAG_NAME, "a")
-                player_name = player_a_tag.text.strip()
-                player_id = player_a_tag.get_attribute("href").split("/")[-2]
+        tables = driver.find_elements(By.CSS_SELECTOR, "table[data-testid^='stats-']")
+        for table in tables:
+            team_id = table.get_attribute("data-testid").replace("stats-", "")
+            rows = table.find_elements(By.CSS_SELECTOR, "tbody tr")
+            for row in rows:
+                try:
+                    cells = row.find_elements(By.TAG_NAME, "td")
+                    if len(cells) < 6:
+                        continue
+                    jersey = cells[0].text.strip()
+                    player_a_tag = cells[1].find_element(By.TAG_NAME, "a")
+                    player_name = player_a_tag.text.strip()
+                    player_id = player_a_tag.get_attribute("href").split("/")[-2]
 
-                points = int(cells[2].text.strip() or 0)
-                one_pm = int(cells[3].text.strip() or 0)
-                two_pm = int(cells[4].text.strip() or 0)
-                three_pm = int(cells[5].text.strip() or 0)
-                fouls = int(cells[6].text.strip() or 0) if len(cells) > 6 else 0
+                    points = int(cells[2].text.strip() or 0)
+                    one_pm = int(cells[3].text.strip() or 0)
+                    two_pm = int(cells[4].text.strip() or 0)
+                    three_pm = int(cells[5].text.strip() or 0)
+                    fouls = int(cells[6].text.strip() or 0) if len(cells) > 6 else 0
 
-                all_players.append({
-                    "grade": game['grade'],          # Added grade
-                    "game_date": game['date'],
-                    "round": game['round'],
-                    "team": team_id,
-                    "player_id": player_id,
-                    "player_name": player_name,
-                    "jersey": jersey,
-                    "points": points,
-                    "1PM": one_pm,
-                    "2PM": two_pm,
-                    "3PM": three_pm,
-                    "fouls": fouls
-                })
-            except Exception as e:
-                print("Error parsing player row:", e)
+                    player_data = {
+                        "grade": game['grade'],
+                        "game_date": game['date'],
+                        "round": game['round'],
+                        "team": team_id,
+                        "player_id": player_id,
+                        "player_name": player_name,
+                        "jersey": jersey,
+                        "points": points,
+                        "1PM": one_pm,
+                        "2PM": two_pm,
+                        "3PM": three_pm,
+                        "fouls": fouls
+                    }
 
-driver.quit()
+                    with lock:
+                        all_players.append(player_data)
+                except Exception as e:
+                    print("Error parsing player row:", e)
+
+    driver.quit()
 
 # -----------------------
-# Step 5: Save CSVs
+# Launch threads per grade
+# -----------------------
+threads = []
+for grade_name, grade_url in grades_info:
+    t = threading.Thread(target=scrape_grade, args=(grade_name, grade_url))
+    t.start()
+    threads.append(t)
+
+for t in threads:
+    t.join()
+
+# -----------------------
+# Save CSVs
 # -----------------------
 df_games = pd.DataFrame(all_games)
 df_games.to_csv("data/full_season.csv", index=False)
