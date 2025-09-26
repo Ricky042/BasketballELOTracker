@@ -146,13 +146,17 @@ for _, game in df_games.iterrows():
 # ---------------------------
 all_team_ids = pd.concat([df_games['home_team_id'], df_games['away_team_id']]).unique()
 team_elo = {}
+
 for team_id in all_team_ids:
-    # players currently (or historically) assigned to team in df_players
     roster = df_players[df_players['team'] == team_id]['player_name'].unique()
     if len(roster) == 0:
         team_elo[team_id] = BASE_ELO
     else:
-        team_elo[team_id] = float(np.mean([player_elo.get(pname, BASE_ELO) for pname in roster]))
+        # Get player ELOs for the roster
+        roster_elos = [player_elo.get(pname, BASE_ELO) for pname in roster]
+        # Sort descending and take the top 5
+        top5_elos = sorted(roster_elos, reverse=True)[:5]
+        team_elo[team_id] = float(np.mean(top5_elos))
 
 # ---------------------------
 # Output & Save
